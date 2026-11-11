@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Secrets
+.env
+
+# Local state (SQLite DBs, checkpoints, run logs, vector index)
+data/
+runs/
+*.db
+*.db-shm
+*.db-wal
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

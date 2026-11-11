@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Test
+        run: uv run pytest
+      # Phase 5: eval job with a pass threshold (same pattern as Drilldown)
