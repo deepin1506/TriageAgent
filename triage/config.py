@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = None
     api_cors_origins: list[str] = []  # e.g. ["http://localhost:5173"] for the React page
 
+    # Public demo (Render): the API starts its own private mock ServiceNow, visitors need no
+    # key, and LLM spend is capped. Requests WITH the API key (you) skip the caps.
+    demo_mode: bool = False
+    demo_max_runs_per_day: int = 50  # triage runs started by visitors, per UTC day
+    demo_max_active_runs: int = 3  # visitor runs in flight at once
+    demo_max_incidents_per_day: int = 100  # tickets visitors may create, per UTC day
+
     # Local state
     checkpoint_db: str = "data/checkpoints.db"  # LangGraph checkpoints + the run registry
     run_log: str = "runs/runs.jsonl"

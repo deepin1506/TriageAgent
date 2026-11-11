@@ -1,0 +1,17 @@
+# Only what the image needs: pyproject.toml, uv.lock, README.md, mock_snow/, triage/, kb/
+.git
+.github
+.venv
+.env
+.env.*
+!.env.example
+data
+runs
+*.db
+__pycache__
+.pytest_cache
+.ruff_cache
+tests
+evals
+examples
+Claude outputs

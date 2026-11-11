@@ -13,7 +13,7 @@ import sys
 from triage.config import Settings, get_settings
 from triage.llm import LLMConfigError
 
-from .chunking import load_chunks
+from .build import build_index
 from .embeddings import make_embedder
 from .evaluate import evaluate, load_cases
 from .store import KBIndex, index_dir
@@ -28,11 +28,8 @@ def _settings(args: argparse.Namespace) -> Settings:
 
 def cmd_build(args: argparse.Namespace) -> None:
     settings = _settings(args)
-    chunks = load_chunks(settings.kb_dir)
-    embedder = make_embedder(settings)
-    index = KBIndex.build(chunks, embedder)
+    index = build_index(settings)
     out = index_dir(settings)
-    index.save(out)
     m = index.manifest
     print(f"Indexed {m['chunks']} chunks from {m['articles']} articles with {m['embedder']}")
     print(f"Saved to {out}")

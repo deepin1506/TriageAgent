@@ -69,6 +69,8 @@ kb/             15 fictional IT knowledge-base articles (markdown + frontmatter)
 evals/          tickets.csv (40 labelled tickets), retrieval.jsonl (20 questions), thresholds.json
 examples/       hitl_demo.py: LangGraph interrupt + persistent checkpointer, no LLM
 tests/          Specs per layer; fakes.py has a scripted LLM so tests never call a real model
+Dockerfile      Two-stage image (uv-built venv, non-root); docker-compose.yml runs it locally
+render.yaml     Render Blueprint for the public demo
 ```
 
 ## Mock ServiceNow API
@@ -296,6 +298,26 @@ What happened, honestly:
 - **A real bug the eval found:** in run 4 the model invented a group, "Service Desk: L1", from a group list formatted as `name: description`. The policy check caught it (nothing wrong was written, the ticket was left unassigned). Fixed after the run by constraining `assignment_group` to the live group names (an enum in the JSON schema) and reformatting the list; not yet re-measured.
 - **Remaining misses look like honest disagreements**: a nearly full C: drive (hardware or software? urgency 2 or 3?), a warehouse load failure (impact 1 or 2?), a USB stick found in the car park (the model treats it as an active threat).
 - **Latency**: median 6–14 s per ticket. The p95 (40–70 s) is Gemini retrying after overload errors; Phase 6 adds per-step timing to show it.
+
+## Deploy: public demo on Render
+
+The live demo is one container on Render's free tier, in **demo mode** (`DEMO_MODE=true`):
+
+- The API starts its **own private mock ServiceNow** inside the container (random password, no admin routes, freshly seeded on every boot). Visitors can triage, approve and even inject prompts, and nothing real can be touched.
+- Visitors need no key. Two extra routes let them **create and list tickets**: `POST /demo/incidents`, `GET /demo/incidents`. The agent itself still can't create incidents; these routes use the ServiceNow client directly.
+- **Visitor LLM spend is capped**: `DEMO_MAX_RUNS_PER_DAY` (50), `DEMO_MAX_ACTIVE_RUNS` (3) and `DEMO_MAX_INCIDENTS_PER_DAY` (100) return 429 when exceeded. Requests with `API_KEY` (the owner) skip the caps.
+- The KB index is built on boot (the disk starts empty). If the embedding API is down, the demo starts anyway, without the KB.
+- Free-tier facts: 512 MB (the app idles at about 160 MB), it **sleeps after ~15 idle minutes** so the first request can take about a minute, and state (runs, log) **resets on every restart or deploy**.
+
+Run the same container locally:
+
+```bash
+docker compose up --build          # http://localhost:8000/docs, reads .env
+```
+
+Deploy your own: on Render choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY` when asked. `render.yaml` sets everything else, generates the owner `API_KEY`, and deploys a commit only after its GitHub checks pass (**ci**, plus **eval** when that commit triggers it). CI builds the image and smoke-tests it as the demo, so a broken Dockerfile fails in CI rather than on Render.
+
+Live demo: *link added after the first deploy.*
 
 ## Roadmap
 

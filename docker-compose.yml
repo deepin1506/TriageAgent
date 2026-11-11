@@ -1,0 +1,11 @@
+# Run the public-demo container locally, exactly as Render runs it:
+#   docker compose up --build        then open http://localhost:8000/docs
+# Reads GEMINI_API_KEY, LLM_MODEL and API_KEY from your .env.
+services:
+  triage:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DEMO_MODE: "true"  # private mock ServiceNow inside the container

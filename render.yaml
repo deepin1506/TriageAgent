@@ -1,0 +1,22 @@
+# Render Blueprint: New > Blueprint > pick this repo. Render asks for the values marked
+# sync: false once, when the Blueprint is first created.
+services:
+  - type: web
+    name: triage-agent
+    runtime: docker
+    plan: free  # 512 MB, sleeps after ~15 idle minutes; first request then takes ~1 min
+    region: singapore  # closest to India; can't be changed later
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass  # deploy only after the commit's GitHub checks pass
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LLM_MODEL
+        value: gemini-3.1-flash-lite
+      - key: API_KEY  # yours: requests with it skip the demo caps
+        generateValue: true
+      - key: DEMO_MAX_RUNS_PER_DAY
+        value: "50"

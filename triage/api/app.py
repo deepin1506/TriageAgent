@@ -11,6 +11,10 @@
 Every route except /health needs the X-API-Key header. Without API_KEY configured the app
 refuses to start (fail closed). Runs execute in the background because an LLM run can
 take a minute; the client polls GET /runs/{thread_id}.
+
+Demo mode (DEMO_MODE=true, the public Render deploy): the app starts its own private mock
+ServiceNow, visitors can call everything without a key, and two extra routes let them
+create and list tickets. Visitor LLM spend is capped per day; requests with the key skip it.
 """
 
 import argparse
@@ -19,38 +23,60 @@ import logging
 import os
 import secrets
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyHeader
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 
+from mock_snow.thread import private_mock
 from triage.agent.graph import build_graph
 from triage.agent.runtime import AgentDeps, connect_tools
 from triage.agent.schemas import Decision
 from triage.agent.service import NotPending, RunConflict, RunRegistry, TriageService
 from triage.config import Settings, get_settings
+from triage.kb.build import ensure_index
 from triage.llm import make_chat_model
 from triage.mcp_server.models import IncidentNumber
-from triage.mcp_server.server import build_server
+from triage.mcp_server.server import build_server, make_snow_client
 from triage.observability import RunLog, metrics
 
 log = logging.getLogger("triage.api")
 
 Status = Literal["running", "pending_approval", "done", "error"]
+INCIDENT_FIELDS = [
+    "number",
+    "short_description",
+    "category",
+    "priority",
+    "assignment_group",
+    "state",
+    "sys_created_on",
+]
 
 
 class TriageRequest(BaseModel):
     number: IncidentNumber
 
 
+class NewIncident(BaseModel):
+    short_description: str = Field(min_length=3, max_length=160)
+    description: str = Field(min_length=3, max_length=2000)
+
+
 def _service(request: Request) -> TriageService:
     return request.app.state.service
+
+
+def _today() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 def create_app(
@@ -66,12 +92,34 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        Path(settings.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
-        async with (
-            AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver,
-            RunRegistry.open(settings.checkpoint_db) as registry,
-            connect_tools(tools_target or build_server(settings)) as tools,
-        ):
+        async with AsyncExitStack() as stack:
+            agent_settings = settings
+            if settings.demo_mode:
+                # A private ServiceNow per container: visitors can break nothing real, and
+                # every restart (Render's free tier sleeps when idle) starts from the seed.
+                url, user, password = stack.enter_context(private_mock(settings.snow_username))
+                agent_settings = settings.model_copy(
+                    update={
+                        "snow_base_url": url,
+                        "snow_username": user,
+                        "snow_password": SecretStr(password),
+                        "snow_token": None,
+                    }
+                )
+                await asyncio.to_thread(ensure_index, agent_settings)  # empty disk on boot
+                snow = make_snow_client(agent_settings)
+                stack.push_async_callback(snow.aclose)
+                app.state.snow = snow
+                app.state.new_incidents = {}  # {"YYYY-MM-DD": count}
+
+            Path(settings.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
+            saver = await stack.enter_async_context(
+                AsyncSqliteSaver.from_conn_string(settings.checkpoint_db)
+            )
+            registry = await stack.enter_async_context(RunRegistry.open(settings.checkpoint_db))
+            tools = await stack.enter_async_context(
+                connect_tools(tools_target or build_server(agent_settings))
+            )
             deps = AgentDeps(
                 llm=chat,
                 tools=tools,
@@ -79,7 +127,8 @@ def create_app(
                 injection_threshold=settings.guard_injection_threshold,
             )
             graph = build_graph().compile(checkpointer=saver)
-            service = TriageService(graph, deps, registry, RunLog(settings.run_log), settings)
+            run_log = RunLog(settings.run_log)
+            service = TriageService(graph, deps, registry, run_log, agent_settings)
             if fixed := await service.reconcile():
                 log.warning("Recovered %d run(s) left unfinished by a restart", fixed)
             app.state.service = service
@@ -89,7 +138,7 @@ def create_app(
                 task.cancel()
             await asyncio.gather(*app.state.tasks, return_exceptions=True)
 
-    app = FastAPI(title="Triage agent API", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="Triage agent API", version="0.7.0", lifespan=lifespan)
     if settings.api_cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -100,16 +149,24 @@ def create_app(
 
     header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-    def require_key(key: str | None = Depends(header)) -> None:
+    def caller(key: str | None = Depends(header)) -> bool:
+        """True for the owner (valid key). In demo mode, no key = a visitor (False)."""
         # compare_digest: constant-time, so the key can't be guessed byte by byte from timing
-        if not key or not secrets.compare_digest(key.encode(), expected_key):
-            raise HTTPException(401, "Missing or wrong X-API-Key")
+        if key and secrets.compare_digest(key.encode(), expected_key):
+            return True
+        if settings.demo_mode and not key:
+            return False
+        raise HTTPException(401, "Missing or wrong X-API-Key")
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, Any]:
+        return {"status": "ok", "demo": settings.demo_mode}
 
-    api = APIRouter(dependencies=[Depends(require_key)])
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/docs")
+
+    api = APIRouter(dependencies=[Depends(caller)])
 
     async def run_in_background(service: TriageService, thread: str, value: Any) -> None:
         try:
@@ -117,11 +174,25 @@ def create_app(
         except Exception:  # already recorded as status 'error' and in the run log
             log.exception("Run %s failed", thread)
 
+    async def check_demo_caps(service: TriageService) -> None:
+        """Visitors spend the owner's LLM quota, so cap it: per day, and in flight at once."""
+        today = await service.registry.count(since=_today())
+        if today >= settings.demo_max_runs_per_day:
+            raise HTTPException(429, "The demo's daily run limit is used up; try tomorrow.")
+        if await service.registry.count(status="running") >= settings.demo_max_active_runs:
+            raise HTTPException(429, "The demo is busy; try again in a minute.")
+
     @api.post("/triage", status_code=202)
     async def start(
-        body: TriageRequest, request: Request, response: Response, wait: bool = False
+        body: TriageRequest,
+        request: Request,
+        response: Response,
+        wait: bool = False,
+        owner: bool = Depends(caller),
     ) -> dict[str, Any]:
         service = _service(request)
+        if settings.demo_mode and not owner:
+            await check_demo_caps(service)
         try:
             thread = await service.create(body.number)
         except RunConflict as err:
@@ -164,6 +235,31 @@ def create_app(
     async def get_metrics(request: Request) -> dict[str, Any]:
         records = await asyncio.to_thread(_service(request).run_log.read)
         return metrics(records)
+
+    if settings.demo_mode:
+        # Demo only: the agent itself still can't create incidents (least privilege). These
+        # routes use the ServiceNow client directly, against the container's private mock.
+
+        @api.post("/demo/incidents", status_code=201)
+        async def create_incident(
+            body: NewIncident, request: Request, owner: bool = Depends(caller)
+        ) -> dict[str, str]:
+            counts = request.app.state.new_incidents
+            if not owner and counts.get(_today(), 0) >= settings.demo_max_incidents_per_day:
+                raise HTTPException(429, "The demo's daily ticket limit is used up.")
+            created = await request.app.state.snow.create_record("incident", body.model_dump())
+            counts[_today()] = counts.get(_today(), 0) + 1
+            return {"number": created["number"], "short_description": body.short_description}
+
+        @api.get("/demo/incidents")
+        async def list_incidents(request: Request) -> list[dict[str, Any]]:
+            return await request.app.state.snow.query(
+                "incident",
+                "active=true^ORDERBYDESCnumber",
+                limit=50,
+                fields=INCIDENT_FIELDS,
+                display_value="true",
+            )
 
     app.include_router(api)
     return app

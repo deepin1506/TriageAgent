@@ -151,3 +151,53 @@ def test_a_restart_recovers_runs_left_running(
         assert crashed["status"] == "error" and "restart" in crashed["error"]
         # It had reached the approval point, so it's still safely waiting for a decision.
         assert c.get(f"/runs/{pending}").json()["status"] == "pending_approval"
+
+
+# --- demo mode (the public Render deploy) ---------------------------------------------------
+
+
+@pytest.fixture
+def demo_settings(tmp_path: Path) -> Settings:
+    # No live_server: in demo mode the app starts its own private mock ServiceNow.
+    return api_settings("http://unused", tmp_path, demo_mode=True)
+
+
+def test_demo_visitors_can_create_triage_and_approve_without_a_key(demo_settings) -> None:
+    with TestClient(create_app(demo_settings, llm=ScriptedLLM(SCRIPT))) as visitor:
+        seeded = visitor.get("/demo/incidents").json()
+        assert len(seeded) == 8 and visitor.get("/health").json()["demo"] is True
+
+        ticket = {"short_description": "Teams keeps crashing", "description": "Since today."}
+        created = visitor.post("/demo/incidents", json=ticket)
+        assert created.status_code == 201
+        number = created.json()["number"]
+
+        run = visitor.post("/triage?wait=true", json={"number": number}).json()
+        assert run["status"] == "pending_approval"
+        done = visitor.post(f"/runs/{run['thread_id']}/decision", json=APPROVE).json()
+        assert done["summary"].startswith("Applied")
+
+        listed = {i["number"]: i for i in visitor.get("/demo/incidents").json()}
+        assert listed[number]["assignment_group"] == "Network Operations"  # the script's pick
+        assert visitor.get("/runs", headers={"X-API-Key": "wrong"}).status_code == 401
+
+
+def test_demo_caps_visitor_spend_but_not_the_owner(demo_settings) -> None:
+    capped = demo_settings.model_copy(
+        update={"demo_max_runs_per_day": 1, "demo_max_incidents_per_day": 1}
+    )
+    with TestClient(create_app(capped, llm=ScriptedLLM(SCRIPT))) as visitor:
+        assert visitor.post("/triage?wait=true", json={"number": "INC0010001"}).status_code == 200
+        over = visitor.post("/triage", json={"number": "INC0010002"})
+        assert over.status_code == 429 and "daily" in over.json()["detail"]
+        owner = visitor.post("/triage?wait=true", json={"number": "INC0010002"}, headers=KEY)
+        assert owner.status_code == 200, "the API key skips the demo caps"
+
+        ticket = {"short_description": "Mouse broken", "description": "Left button."}
+        assert visitor.post("/demo/incidents", json=ticket).status_code == 201
+        assert visitor.post("/demo/incidents", json=ticket).status_code == 429
+
+
+def test_demo_routes_do_not_exist_outside_demo_mode(client: TestClient) -> None:
+    assert client.get("/demo/incidents").status_code == 404
+    assert client.get("/health").json()["demo"] is False

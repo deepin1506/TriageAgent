@@ -125,6 +125,16 @@ class RunRegistry:
             row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def count(self, *, status: str | None = None, since: str | None = None) -> int:
+        query, args = "SELECT COUNT(*) FROM triage_runs WHERE 1 = 1", []
+        if status:
+            query, args = query + " AND status = ?", [*args, status]
+        if since:
+            query, args = query + " AND created_at >= ?", [*args, since]
+        async with self._conn.execute(query, args) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def list(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         query, args = "SELECT * FROM triage_runs", ()
         if status:

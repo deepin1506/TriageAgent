@@ -11,7 +11,9 @@ on:
 jobs:
   eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # ~20 min on a normal day (50 tickets, 4 s apart for free-tier rate limits); Gemini
+    # overload retries can double it. Step timeouts below say WHICH step ran long.
+    timeout-minutes: 60
     env:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       LLM_MODEL: ${{ vars.LLM_MODEL }}
@@ -32,15 +34,19 @@ jobs:
 
       - name: Build the KB index (Gemini embeddings)
         if: env.GEMINI_API_KEY != ''
+        timeout-minutes: 5
         run: uv run triage-kb build
       - name: Retrieval eval
         if: env.GEMINI_API_KEY != ''
+        timeout-minutes: 5
         run: uv run triage-kb eval --min-hit-rate 0.9
       - name: Agent eval (fails below evals/thresholds.json)
         if: env.GEMINI_API_KEY != ''
+        timeout-minutes: 35
         run: uv run triage-eval --sleep 4
       - name: Held-out eval (report only)
         if: always() && env.GEMINI_API_KEY != ''
+        timeout-minutes: 12
         run: uv run triage-eval --cases evals/holdout.csv --out evals/results/holdout --no-gate --sleep 4
 
       - name: Report in the job summary

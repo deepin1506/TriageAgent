@@ -21,4 +21,25 @@ jobs:
           uv run ruff format --check .
       - name: Test
         run: uv run pytest
-      # Phase 5: eval job with a pass threshold (same pattern as Drilldown)
+
+  docker:
+    # Build the image Render deploys and smoke-test it as the public demo (offline: fake LLM
+    # key, hash embeddings), so a broken Dockerfile fails here, not on Render.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image
+        run: docker build -t triage-agent .
+      - name: Smoke test the demo container
+        run: |
+          docker run -d --name triage -p 8000:8000 \
+            -e DEMO_MODE=true -e API_KEY=ci -e LLM_MODEL=ci -e GEMINI_API_KEY=ci \
+            -e EMBED_PROVIDER=hash triage-agent
+          for i in $(seq 1 30); do curl -fs localhost:8000/health && break; sleep 2; done
+          curl -fs localhost:8000/health | grep -q '"demo":true'
+          curl -fs localhost:8000/demo/incidents \
+            | python3 -c "import sys, json; assert len(json.load(sys.stdin)) == 8"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-API-Key: wrong' localhost:8000/runs)" = 401
+      - name: Container logs
+        if: always()
+        run: docker logs triage || true

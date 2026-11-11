@@ -7,20 +7,16 @@ The only thing that differs from production is who clicks "approve".
 """
 
 import asyncio
-import secrets
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import SecretStr
 
-from mock_snow.settings import MockSettings
-from mock_snow.thread import running_mock
+from mock_snow.thread import private_mock
 from triage.agent.graph import build_graph
 from triage.agent.runtime import AgentDeps, connect_tools
 from triage.config import Settings
@@ -120,27 +116,17 @@ async def run_eval(
     Tickets that failed only because the provider was overloaded are re-run after a pause,
     up to `retry_rounds` times. Anything else (bad output, a bug) is never retried, and a
     ticket still failing after the last round counts as wrong."""
-    password = secrets.token_urlsafe(16)
-    mock_settings = MockSettings(
-        _env_file=None,
-        snow_username=EVAL_USER,
-        snow_password=password,
-        snow_token=None,
-        snow_mock_db=str(Path(tempfile.mkdtemp(prefix="eval-snow-")) / "snow.db"),
-        snow_mock_admin=False,
-        snow_mock_fault_rate=0.0,
-    )
     results: list[CaseResult] = []
 
     def report(i: int, total: int, r: CaseResult) -> None:
         status = "ok" if not r.error else "PROVIDER ERROR" if r.transient else "ERROR"
         progress(f"[{i}/{total}] {r.case_id} {status} ({r.latency_s:.1f}s)")
 
-    with running_mock(mock_settings) as url:
+    with private_mock(EVAL_USER) as (url, user, password):
         agent_settings = settings.model_copy(
             update={
                 "snow_base_url": url,
-                "snow_username": EVAL_USER,
+                "snow_username": user,
                 "snow_password": SecretStr(password),  # model_copy doesn't re-validate
                 "snow_token": None,
             }
