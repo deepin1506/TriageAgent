@@ -181,7 +181,9 @@ The agent's `retrieve` step calls the `search_kb` MCP tool with the ticket text.
 | Embedder | hit@4 | MRR |
 |---|---|---|
 | `hash` (offline lexical baseline, gated in tests at ≥ 0.90) | 0.95 | 0.93 |
-| `gemini-embedding-001` | run `uv run triage-kb eval` | |
+| `gemini-embedding-001` (768 dims) | 1.00 | 1.00 |
+
+Gemini gets every question right, including the paraphrased ones the lexical baseline misses. With 20 questions over 15 short articles that's a saturated benchmark: it catches regressions but can't separate good retrievers from great ones. A harder set (more articles, near-duplicate articles, vaguer questions) is the next step.
 
 Known limits: no hybrid (keyword + vector) search, no re-ranking, and matches usually land on "Symptoms" sections rather than "Resolution" (small-to-big retrieval would fix that).
 

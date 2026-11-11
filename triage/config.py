@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     llm_model: str = ""  # Gemini model ID (Azure uses the deployment name instead)
     llm_temperature: float | None = None  # None = the provider/library default
     llm_timeout_s: float = 60.0
-    llm_max_retries: int = 2  # SDK-level retries on 429/5xx
+    llm_max_retries: int = 4  # retries (after the first try) on 429/5xx, with backoff
     gemini_api_key: SecretStr | None = None
     azure_openai_endpoint: str | None = None
     azure_openai_api_key: SecretStr | None = None

@@ -62,6 +62,23 @@ async def test_azure_swap_is_config_only() -> None:
     assert llm.deployment_name == "triage-gpt"
 
 
+async def test_retry_setting_means_retries_for_both_providers() -> None:
+    # Google's SDK counts the first try as an attempt; OpenAI's doesn't.
+    gemini = make_chat_model(settings(llm_model="m", gemini_api_key="k", llm_max_retries=3))
+    azure = make_chat_model(
+        settings(
+            llm_provider="azure_openai",
+            azure_openai_endpoint="https://example.openai.azure.com",
+            azure_openai_api_key="k",
+            azure_openai_api_version="2024-10-21",
+            azure_openai_deployment="d",
+            llm_max_retries=3,
+        )
+    )
+    assert gemini.max_retries == 4
+    assert azure.max_retries == 3
+
+
 # --- call_structured ---------------------------------------------------------------------
 
 

@@ -48,10 +48,10 @@ class StructuredResult[T: BaseModel]:
 
 def make_chat_model(settings: Settings) -> BaseChatModel:
     """Build the chat model for the configured provider. No network call happens here."""
-    common: dict[str, Any] = {
-        "timeout": settings.llm_timeout_s,
-        "max_retries": settings.llm_max_retries,
-    }
+    # Both SDKs retry 429/5xx with exponential backoff, but they count differently:
+    # OpenAI's max_retries is retries; Gemini's is TOTAL attempts (Google SDK quirk),
+    # so the same setting gets +1 for Gemini.
+    common: dict[str, Any] = {"timeout": settings.llm_timeout_s}
     if settings.llm_temperature is not None:
         common["temperature"] = settings.llm_temperature
 
@@ -71,6 +71,7 @@ def make_chat_model(settings: Settings) -> BaseChatModel:
         return ChatGoogleGenerativeAI(
             model=settings.llm_model,
             api_key=settings.gemini_api_key.get_secret_value(),  # type: ignore[union-attr]
+            max_retries=settings.llm_max_retries + 1,
             **common,
         )
 
@@ -90,6 +91,7 @@ def make_chat_model(settings: Settings) -> BaseChatModel:
         api_key=settings.azure_openai_api_key.get_secret_value(),  # type: ignore[union-attr]
         api_version=settings.azure_openai_api_version,
         azure_deployment=settings.azure_openai_deployment,
+        max_retries=settings.llm_max_retries,
         **common,
     )
 
