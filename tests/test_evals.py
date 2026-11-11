@@ -91,6 +91,14 @@ def test_the_dataset_is_valid_and_covers_every_category() -> None:
     assert {c.priority for c in cases} >= {"1", "2", "3", "4", "5"}  # every priority occurs
 
 
+def test_the_holdout_set_is_valid_and_separate() -> None:
+    # Written after run 1, against the revised rubric, and never used to tune the prompt.
+    holdout = load_cases(REPO / "evals" / "holdout.csv")
+    assert len(holdout) == 10
+    assert not {c.id for c in holdout} & {c.id for c in load_cases(CSV)}
+    assert not {c.description for c in holdout} & {c.description for c in load_cases(CSV)}
+
+
 def test_bad_labels_are_rejected_before_any_llm_call(tmp_path: Path) -> None:
     rows = CSV.read_text(encoding="utf-8").splitlines()
     bad = tmp_path / "bad.csv"
