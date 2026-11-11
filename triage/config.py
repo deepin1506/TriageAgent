@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     azure_openai_api_version: str | None = None
     azure_openai_deployment: str | None = None
 
+    # Knowledge base / RAG
+    embed_provider: Literal["gemini", "azure_openai", "hash"] = "gemini"  # hash = offline
+    embed_model: str = "gemini-embedding-001"  # Azure: the embedding deployment name
+    embed_dims: int = 768
+    kb_dir: str = "kb"
+    kb_index_dir: str = "data/kb_index"
+    kb_top_k: int = 4
+    kb_min_score: float = 0.0  # cosine similarity floor; tune it with `triage-kb eval`
+
+    # Guardrails
+    guard_injection_mode: Literal["flag", "block"] = "flag"  # block = skip automatic triage
+    guard_injection_threshold: int = 3  # summed signal weight that counts as an attack
+
     # Local state
     checkpoint_db: str = "data/checkpoints.db"
     run_log: str = "runs/runs.jsonl"

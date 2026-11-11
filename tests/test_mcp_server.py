@@ -23,7 +23,7 @@ from triage.mcp_server.server import build_server
 
 pytestmark = pytest.mark.anyio
 
-TOOL_NAMES = {"get_incident", "create_incident", "update_incident", "assign_group"}
+TOOL_NAMES = {"get_incident", "search_kb", "create_incident", "update_incident", "assign_group"}
 
 
 @pytest.fixture
@@ -80,6 +80,7 @@ async def test_update_schema_uses_enums_and_has_no_priority(mcp: Client) -> None
 async def test_annotations(mcp: Client) -> None:
     ann = {t.name: t.annotations for t in (await mcp.list_tools()).tools}
     assert ann["get_incident"].read_only_hint is True
+    assert ann["search_kb"].read_only_hint is True
     assert ann["create_incident"].idempotent_hint is True
     assert ann["update_incident"].destructive_hint is True
     assert ann["assign_group"].destructive_hint is True
@@ -89,6 +90,7 @@ async def test_annotations(mcp: Client) -> None:
     "tool,args",
     [
         ("get_incident", {"number": "12345"}),
+        ("search_kb", {"query": "vpn drops", "top_k": 50}),
         ("update_incident", {"number": "INC0010001", "category": "printers"}),
         ("update_incident", {"number": "INC0010001", "priority": "1"}),
         ("create_incident", {"short_description": "x", "description": "", "correlation_id": "c"}),
@@ -263,3 +265,29 @@ async def test_end_to_end_over_stdio(live_server: str, mock_admin: httpx.Client,
         result = await client.call_tool("get_incident", {"number": "INC0010002"})
     assert not result.is_error, text(result)
     assert result.structured_content["caller"] == "Meera Iyer"
+
+
+# --- search_kb (Phase 3) -----------------------------------------------------------------
+
+
+async def test_search_kb_returns_cited_sections(mcp: Client) -> None:
+    result = await mcp.call_tool(
+        "search_kb", {"query": "VPN keeps disconnecting when I work from home"}
+    )
+    assert not result.is_error, text(result)
+    hits = result.structured_content["hits"]
+    assert 1 <= len(hits) <= 4
+    top = hits[0]
+    assert top["article_id"] == "KB0001" and top["id"].startswith("KB0001#")
+    assert top["group"] == "Network Operations" and top["text"]
+
+
+async def test_search_kb_without_an_index_fails_clearly_and_alone(
+    live_server: str, mock_admin: httpx.Client, tmp_path: Path
+) -> None:
+    server = build_server(settings_for(live_server, kb_index_dir=str(tmp_path / "missing")))
+    async with Client(server) as client:
+        result = await client.call_tool("search_kb", {"query": "vpn drops"})
+        assert result.is_error and "knowledge base" in text(result).lower()
+        still_fine = await client.call_tool("get_incident", {"number": "INC0010001"})
+        assert not still_fine.is_error  # the ticket tools don't depend on the KB

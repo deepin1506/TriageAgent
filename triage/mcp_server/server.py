@@ -18,6 +18,8 @@ from mcp.server.mcpserver.exceptions import ResourceError
 from mcp_types import ToolAnnotations
 
 from triage.config import Settings, get_settings
+from triage.kb.embeddings import Embedder, make_embedder
+from triage.kb.store import KBIndex, index_dir
 from triage.snow_client import SnowClient
 
 from . import tools
@@ -26,8 +28,10 @@ from .models import GroupView
 INSTRUCTIONS = (
     "Tools for triaging ServiceNow incidents. Refer to incidents by number (e.g. INC0010001). "
     "Set impact and urgency; priority is derived from them. Valid assignment group names are "
-    "in the resource snow://assignment-groups."
+    "in the resource snow://assignment-groups. search_kb finds knowledge-base articles."
 )
+
+log = logging.getLogger(__name__)
 
 # Annotations are hints for hosts (e.g. when to ask for confirmation). They are self-declared
 # by the server, so a client must not treat them as a security control.
@@ -35,6 +39,10 @@ TOOLS: list[tuple[Callable[..., Any], ToolAnnotations]] = [
     (
         tools.get_incident,
         ToolAnnotations(title="Get incident", read_only_hint=True, open_world_hint=False),
+    ),
+    (
+        tools.search_kb,
+        ToolAnnotations(title="Search knowledge base", read_only_hint=True, open_world_hint=False),
     ),
     (
         tools.create_incident,
@@ -82,9 +90,23 @@ def make_snow_client(settings: Settings) -> SnowClient:
     )
 
 
+def load_kb(settings: Settings) -> tuple[KBIndex | None, Embedder | None]:
+    """Load the KB index. A missing index or embedder config disables search_kb only;
+    the ticket tools keep working (graceful degradation)."""
+    try:
+        embedder = make_embedder(settings)
+        return KBIndex.load(index_dir(settings), embedder), embedder
+    except Exception as err:  # config, missing files, embedder mismatch
+        log.warning("search_kb disabled: %s", err)
+        return None, None
+
+
 def build_server(settings: Settings | None = None) -> MCPServer:
     settings = settings or get_settings()
-    app = tools.AppContext()
+    kb, embedder = load_kb(settings)
+    app = tools.AppContext(
+        kb=kb, embedder=embedder, kb_top_k=settings.kb_top_k, kb_min_score=settings.kb_min_score
+    )
 
     @asynccontextmanager
     async def lifespan(_: MCPServer) -> AsyncIterator[tools.AppContext]:

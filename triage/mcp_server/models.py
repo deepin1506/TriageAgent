@@ -48,3 +48,18 @@ class IncidentView(BaseModel):
 class GroupView(BaseModel):
     name: str
     description: str
+
+
+class KBHit(BaseModel):
+    id: str = Field(description="Citation id, e.g. KB0001#resolution")
+    article_id: str
+    title: str
+    section: str
+    category: str
+    group: str = Field(description="Team that owns this kind of issue")
+    score: float = Field(description="Cosine similarity, higher is more relevant")
+    text: str
+
+
+class KBSearchResult(BaseModel):
+    hits: list[KBHit]

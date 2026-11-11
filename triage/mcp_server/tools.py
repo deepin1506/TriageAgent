@@ -8,17 +8,30 @@ as its description. They're written for the model; notes for humans are comments
 Registration (names, annotations, the allowlist) lives in server.py.
 """
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from pydantic import Field
 
+from triage.kb.embeddings import Embedder
+from triage.kb.store import KBIndex
 from triage.snow_client import SnowClient, SnowError
 
-from .models import Category, GroupView, IncidentNumber, IncidentView, Level, State, WorkNote
+from .models import (
+    Category,
+    GroupView,
+    IncidentNumber,
+    IncidentView,
+    KBHit,
+    KBSearchResult,
+    Level,
+    State,
+    WorkNote,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +41,10 @@ class AppContext:
     """Shared server state. The lifespan in server.py opens/closes the client."""
 
     snow: SnowClient | None = None
+    kb: KBIndex | None = None  # None when the index isn't built or can't be loaded
+    embedder: Embedder | None = None
+    kb_top_k: int = 4
+    kb_min_score: float = 0.0
 
 
 def snow(ctx: Context) -> SnowClient:
@@ -240,3 +257,25 @@ async def assign_group(
     if work_note:
         changes["work_notes"] = work_note
     return await _patch(ctx, number, changes)
+
+
+async def search_kb(
+    ctx: Context,
+    query: Annotated[
+        str, Field(min_length=3, max_length=2000, description="The problem, in plain words")
+    ],
+    top_k: Annotated[int | None, Field(ge=1, le=8)] = None,
+) -> KBSearchResult:
+    """Search the IT knowledge base. Returns the most relevant article sections, each with a
+    citation id such as KB0001#resolution and the team that owns that kind of issue."""
+    app: AppContext = ctx.request_context.lifespan_context
+    if app.kb is None or app.embedder is None:
+        raise ToolError("The knowledge base is not available right now.")
+    try:
+        # Embedding calls a network API synchronously; run it off the event loop.
+        vector = await asyncio.to_thread(app.embedder.query, query)
+    except Exception as err:  # the provider's own errors vary; log them, tell the model less
+        log.warning("KB query embedding failed: %r", err)
+        raise ToolError("The knowledge base search failed. Try again later.") from err
+    hits = app.kb.search(vector, k=top_k or app.kb_top_k, min_score=app.kb_min_score)
+    return KBSearchResult(hits=[KBHit(**asdict(h)) for h in hits])

@@ -52,6 +52,12 @@ Action = Annotated[UpdateAction | AssignAction, Field(discriminator="tool")]
 class Proposal(BaseModel):
     actions: list[Action] = Field(min_length=1, max_length=3)
     rationale: str
+    citations: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="Ids of the knowledge-base excerpts you relied on, exactly as labelled "
+        "(e.g. KB0001#resolution). Empty if none applied.",
+    )
 
 
 class Decision(BaseModel):

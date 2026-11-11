@@ -1,23 +1,34 @@
-import socket
-import threading
-import time
+import functools
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
 
 from mock_snow.app import create_app
 from mock_snow.settings import MockSettings
+from mock_snow.thread import running_mock
 from triage.config import Settings
+from triage.kb.chunking import load_chunks
+from triage.kb.embeddings import HashEmbedder
+from triage.kb.store import KBIndex
 
 USER, PASSWORD, TOKEN = "tester", "s3cret", "tok-123"
+REPO = Path(__file__).resolve().parent.parent
+
+
+@functools.cache
+def kb_index_for_tests() -> str:
+    """The repo's kb/ indexed once per test session with the offline hash embedder."""
+    root = tempfile.mkdtemp(prefix="kb-index-")
+    KBIndex.build(load_chunks(REPO / "kb"), HashEmbedder()).save(Path(root) / "hash")
+    return root  # kb_index_dir; the server looks in <root>/<embed_provider>
 
 
 def settings_for(base_url: str, **overrides) -> Settings:
-    """Agent/MCP-server settings pointed at a test mock. No .env, fast retries."""
+    """Agent/MCP-server settings pointed at a test mock. No .env, fast retries, offline KB."""
     values = dict(
         _env_file=None,
         snow_base_url=base_url,
@@ -27,6 +38,8 @@ def settings_for(base_url: str, **overrides) -> Settings:
         snow_timeout_s=2.0,
         snow_max_retries=1,
         snow_backoff_base_s=0.01,
+        embed_provider="hash",
+        kb_index_dir=kb_index_for_tests(),
     )
     return Settings(**(values | overrides))
 
@@ -55,21 +68,8 @@ def api(tmp_path: Path) -> Iterator[TestClient]:
 @pytest.fixture(scope="session")
 def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """The mock on a real port, so client timeouts and retries are exercised for real."""
-    app = create_app(make_settings(tmp_path_factory.mktemp("live") / "snow.db"))
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline:
-            raise RuntimeError("mock server did not start")
-        time.sleep(0.05)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=5)
+    with running_mock(make_settings(tmp_path_factory.mktemp("live") / "snow.db")) as url:
+        yield url
 
 
 @pytest.fixture

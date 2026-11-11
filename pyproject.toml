@@ -15,11 +15,15 @@ dependencies = [
     "mcp>=2.3,<3",
     "langchain-google-genai>=4.4",
     "langchain-openai>=1.7",
+    "faiss-cpu>=1.12",
+    "numpy>=2.0",
 ]
 
 [project.scripts]
 mock-snow = "mock_snow.__main__:main"
 triage = "triage.cli:main"
+triage-kb = "triage.kb.cli:main"
+triage-eval = "triage.evals.cli:main"
 
 [dependency-groups]
 dev = [

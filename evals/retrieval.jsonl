@@ -1,0 +1,20 @@
+{"query": "VPN keeps disconnecting every 10 minutes when I work from home", "relevant": ["KB0001"]}
+{"query": "my connection to the office network from home drops all the time and I lose my CRM session", "relevant": ["KB0001"]}
+{"query": "wifi cuts out in conference room 2B during video calls", "relevant": ["KB0002"]}
+{"query": "Locked out after password reset, MFA prompt not arriving", "relevant": ["KB0003", "KB0004"]}
+{"query": "I changed my password and my account keeps getting locked again", "relevant": ["KB0003"]}
+{"query": "authenticator app on my new phone doesn't get the sign-in approval", "relevant": ["KB0004"]}
+{"query": "need permission to open the finance shared folder, it says access denied", "relevant": ["KB0005"]}
+{"query": "Suspicious email asking me to verify payroll details, I clicked the link", "relevant": ["KB0006"]}
+{"query": "got a message pretending to be HR asking me to confirm my bank account", "relevant": ["KB0006"]}
+{"query": "antivirus popped up a warning and my files won't open anymore", "relevant": ["KB0007"]}
+{"query": "Laptop battery swollen, trackpad lifting", "relevant": ["KB0008"]}
+{"query": "the bottom of my notebook is bulging and it's hot even when I'm not using it", "relevant": ["KB0008"]}
+{"query": "Printer on 3rd floor not printing, shows offline", "relevant": ["KB0009"]}
+{"query": "Outlook keeps asking for my password even though it's correct", "relevant": ["KB0010"]}
+{"query": "people on my Teams meeting can't hear me and my camera is black", "relevant": ["KB0011"]}
+{"query": "Month-end finance reports timing out, error mentions a database query timeout", "relevant": ["KB0012"]}
+{"query": "the sales dashboard fails after a minute for the whole team", "relevant": ["KB0012"]}
+{"query": "I need read-only SQL access to the reporting database for analysis", "relevant": ["KB0013"]}
+{"query": "C drive is full and I can't save documents", "relevant": ["KB0014"]}
+{"query": "what information should I put in a ticket so it gets handled quickly", "relevant": ["KB0015"]}

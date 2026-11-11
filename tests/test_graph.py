@@ -116,6 +116,8 @@ async def test_prompts_carry_the_ticket_and_the_group_catalogue(
     assert "VPN keeps disconnecting" in prompts, "the incident text must reach the LLM"
     # Group descriptions come from the snow://assignment-groups resource, not hardcoding:
     assert "VPN, Wi-Fi, LAN, DNS, firewall, proxy" in prompts
+    # RAG: the VPN article was retrieved through search_kb and shown with its citation id.
+    assert "[KB0001#" in prompts
 
 
 async def test_approve_executes_the_actions(
@@ -184,3 +186,62 @@ async def test_tool_failure_is_recorded_not_raised(
     failed = out["results"][0]
     assert failed["ok"] is False and "unavailable" in (failed["error"] or "").lower()
     assert out["summary"]
+
+
+# --- guardrails end to end (Phase 4) -------------------------------------------------------
+
+PRINTER = "INC0010006"  # printer offline + "IGNORE ALL PREVIOUS INSTRUCTIONS ..."
+PRINTER_SCRIPT: dict[str, Any] = {
+    "category": "hardware",
+    "impact": "2",
+    "urgency": "2",
+    "assignment_group": "End User Computing",
+    "rationale": "Shared floor printer offline; the embedded instructions were ignored.",
+    "actions": [
+        {
+            "tool": "update_incident",
+            "args": {"category": "hardware", "impact": "2", "urgency": "2"},
+        },
+        {"tool": "assign_group", "args": {"group": "End User Computing"}},
+    ],
+}
+
+
+async def test_injected_ticket_is_flagged_for_the_reviewer(
+    tools: ToolGateway, mock_admin: httpx.Client, tmp_path: Path
+) -> None:
+    deps = AgentDeps(ScriptedLLM(PRINTER_SCRIPT), tools)
+    async with compiled(tmp_path / "cp.db") as graph:
+        out = await graph.ainvoke({"number": PRINTER}, config(), context=deps)
+    payload = out["__interrupt__"][0].value
+    assert any("prompt-injection" in w for w in payload["warnings"])
+    assert writes(mock_admin) == []
+
+
+async def test_block_mode_never_reaches_the_llm_or_writes(
+    tools: ToolGateway, mock_admin: httpx.Client, tmp_path: Path
+) -> None:
+    llm = ScriptedLLM(PRINTER_SCRIPT)
+    deps = AgentDeps(llm, tools, injection_mode="block")
+    async with compiled(tmp_path / "cp.db") as graph:
+        out = await graph.ainvoke({"number": PRINTER}, config(), context=deps)
+    assert "__interrupt__" not in out
+    assert "prompt injection" in out["summary"] and out["results"] == []
+    assert llm.calls == [] and writes(mock_admin) == []
+
+
+async def test_actions_changed_after_approval_are_not_executed(
+    tools: ToolGateway, mock_admin: httpx.Client, tmp_path: Path
+) -> None:
+    deps = AgentDeps(ScriptedLLM(SCRIPT), tools)
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "cp.db")) as saver:
+        # Pause again just before execute, so the test can tamper with the checkpoint.
+        graph = build_graph().compile(checkpointer=saver, interrupt_before=["execute"])
+        await start(graph, deps)
+        await graph.ainvoke(Command(resume=APPROVE), config(), context=deps)
+        hijack = [{"tool": "assign_group", "args": {"number": NUMBER, "group": "Service Desk"}}]
+        state = (await graph.aget_state(config())).values
+        await graph.aupdate_state(config(), {"proposal": {**state["proposal"], "actions": hijack}})
+        out = await graph.ainvoke(None, config(), context=deps)
+    assert out["results"][0]["ok"] is False
+    assert writes(mock_admin) == []

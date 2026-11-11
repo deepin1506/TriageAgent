@@ -44,7 +44,13 @@ async def _session() -> AsyncIterator[tuple[CompiledStateGraph, AgentDeps]]:
         AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver,
         connect_tools() as tools,
     ):
-        yield build_graph().compile(checkpointer=saver), AgentDeps(llm=llm, tools=tools)
+        deps = AgentDeps(
+            llm=llm,
+            tools=tools,
+            injection_mode=settings.guard_injection_mode,
+            injection_threshold=settings.guard_injection_threshold,
+        )
+        yield build_graph().compile(checkpointer=saver), deps
 
 
 def _ask_decision() -> dict[str, Any]:
@@ -65,6 +71,8 @@ async def _drive(
     while "__interrupt__" in out:
         payload = out["__interrupt__"][0].value
         _print_json(f"Waiting for approval (thread {thread}):", payload)
+        for warning in payload.get("warnings", []):
+            print(f"\n!! WARNING: {warning}")
         if not prompt:
             print(f"\nResume with:  uv run triage resume {thread} approve|reject")
             return

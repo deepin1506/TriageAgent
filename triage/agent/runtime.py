@@ -18,7 +18,7 @@ from mcp.client.stdio import StdioServerParameters
 
 # Client-side allowlist: what THIS agent may call, a subset of what the server exposes.
 # The server also has create_incident, which a triage agent doesn't need (least privilege).
-AGENT_TOOLS = frozenset({"get_incident", "update_incident", "assign_group"})
+AGENT_TOOLS = frozenset({"get_incident", "search_kb", "update_incident", "assign_group"})
 WRITE_TOOLS = frozenset({"update_incident", "assign_group"})
 
 
@@ -60,11 +60,15 @@ class ToolGateway:
 class AgentDeps:
     llm: BaseChatModel
     tools: ToolGateway
+    injection_mode: str = "flag"  # "flag": warn the reviewer; "block": no automatic triage
+    injection_threshold: int = 3
 
 
 def stdio_server() -> StdioServerParameters:
     """Launch our MCP server as a subprocess, the way any MCP host would."""
-    passthrough = {k: v for k, v in os.environ.items() if k.startswith("SNOW_")}
+    # The server reads .env from the working directory too; these let shell overrides through.
+    prefixes = ("SNOW_", "EMBED_", "KB_", "GEMINI_", "AZURE_OPENAI_")
+    passthrough = {k: v for k, v in os.environ.items() if k.startswith(prefixes)}
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "triage.mcp_server"],

@@ -2,18 +2,19 @@
 
 An IT ticket triage agent: it classifies an incident, retrieves relevant KB articles, proposes an action, waits for **human approval**, then executes it through **MCP tools** against a ServiceNow-shaped API.
 
-> **Status: Phases 0–2 done** (see [Roadmap](#roadmap)): mock ServiceNow API, client, MCP server and the LangGraph agent with human approval, runnable from the CLI. RAG, guardrails and evals are next. Eval results and a live link will be added once they exist.
+> **Status: Phases 0–4 done, Phase 5 in progress** (see [Roadmap](#roadmap)): mock ServiceNow API, client, MCP server, the LangGraph agent with human approval, RAG with cited sources, layered guardrails, and an end-to-end eval harness. Real eval numbers and a live link will be added once they exist.
 
 ## Architecture (target)
 
 ```mermaid
 flowchart LR
-    T[Incident] --> G{guardrails}
-    G -->|injection detected| S[summarize]
+    T[Incident] --> G{guard_input<br/>injection scan}
+    G -->|blocked| S[summarize]
     G --> C[classify<br/>category, impact, urgency, group]
     C --> R[retrieve KB<br/>vector store + citations]
-    R --> P[propose action<br/>Pydantic, tool allowlist]
-    P --> A{{human approval<br/>interrupt + SQLite checkpointer}}
+    R --> P[propose actions<br/>Pydantic, tool allowlist]
+    P --> Q[check_policy<br/>drop bad actions]
+    Q --> A{{human approval<br/>interrupt + SQLite checkpointer}}
     A -->|approve| E[execute]
     A -->|reject| S
     E --> S
@@ -39,7 +40,7 @@ uv run mock-snow             # mock API on http://127.0.0.1:8080  (Swagger UI at
 In a second terminal:
 
 ```powershell
-uv run pytest                                  # infrastructure + contract tests pass; the rest need the TODOs
+uv run pytest                                  # everything, offline (scripted LLM, hash embeddings)
 uv run triage run INC0010001                   # triage one incident (needs LLM_MODEL + GEMINI_API_KEY in .env)
 uv run python examples/hitl_demo.py            # interrupt/resume concept check (no LLM, no keys)
 
@@ -58,7 +59,11 @@ triage/
   llm.py          Gemini / Azure OpenAI swap; call_structured (validation, one repair retry, usage)
   agent/          runtime.py (MCP gateway + allowlist), state.py, schemas.py (LLM outputs),
                   prompts.py, nodes.py (the steps), graph.py (the wiring)
+  kb/             RAG: chunking.py, embeddings.py, store.py (FAISS), evaluate.py, cli.py
+  evals/          Agent eval: dataset.py, runner.py, metrics.py, cli.py
   cli.py          triage run / resume / show
+kb/             15 fictional IT knowledge-base articles (markdown + frontmatter)
+evals/          tickets.csv (40 labelled tickets), retrieval.jsonl (20 questions), thresholds.json
 examples/       hitl_demo.py: LangGraph interrupt + persistent checkpointer, no LLM
 tests/          Specs per layer; fakes.py has a scripted LLM so tests never call a real model
 ```
@@ -113,6 +118,7 @@ Built on MCP Python SDK v2 (`MCPServer`, spec 2026-07-28; legacy clients that us
 | Tool | Annotations | Notes |
 |---|---|---|
 | `get_incident(number)` | read-only | references resolved to names |
+| `search_kb(query, top_k?)` | read-only | top KB sections with citation ids and the owning group |
 | `create_incident(short_description, description, correlation_id, caller_user_name?)` | idempotent | same `correlation_id` → same incident |
 | `update_incident(number, category?, impact?, urgency?, state?, close_code?, close_notes?, work_note?)` | destructive | no `priority` argument: it's derived |
 | `assign_group(number, group, work_note?)` | destructive | group by name; unknown names fail with the valid list |
@@ -150,14 +156,83 @@ uv run triage show INC0010001-a1b2c3               # state of any run
 
 Runs are checkpointed in SQLite (`CHECKPOINT_DB`), so an approval can come from a different process, hours later. The CLI launches the MCP server over stdio. The agent can only call `get_incident`, `update_incident` and `assign_group` (client-side allowlist); `create_incident` exists on the server but isn't needed for triage.
 
+## Knowledge base (RAG)
+
+```bash
+uv run triage-kb build                       # chunk kb/*.md, embed, save a FAISS index
+uv run triage-kb search "vpn keeps dropping"   # inspect what retrieval returns
+uv run triage-kb eval                        # hit@4 and MRR on evals/retrieval.jsonl
+uv run triage-kb --provider hash build       # same, fully offline (no API key)
+```
+
+The agent's `retrieve` step calls the `search_kb` MCP tool with the ticket text. `propose` sees the top sections labelled `[KB0001#symptoms]` and may cite them. Citations that weren't retrieved are dropped before the reviewer sees the proposal, and the approval payload lists the sources. If search fails (no index, embedding API down), triage continues without the KB.
+
+| Choice | Why |
+|---|---|
+| One chunk per `##` section, prefixed "title - section" | A section is one idea; the header gives the embedding context. Over-long sections split on paragraphs with one paragraph of overlap. |
+| Metadata on every chunk (article, section, category, owning group) | Citations, per-article caps, and the owning team shown to the LLM |
+| `gemini-embedding-001`, 768 dims, task types `RETRIEVAL_DOCUMENT` / `RETRIEVAL_QUERY` | Asymmetric retrieval: short questions vs longer passages. Vectors are L2-normalised (Gemini only pre-normalises at 3072 dims). |
+| FAISS `IndexFlatIP` (exact cosine) | ~50 chunks: exact is fast and has no recall loss. At scale: IVF/HNSW, or Azure AI Search for hybrid + filters. |
+| At most 2 chunks per article in the top 4 | One long article can't crowd out the others |
+| Index manifest records the embedder | Loading an index built with another embedder fails loudly instead of returning nonsense |
+
+**Retrieval eval** (20 labelled questions, article-level, top 4):
+
+| Embedder | hit@4 | MRR |
+|---|---|---|
+| `hash` (offline lexical baseline, gated in tests at ≥ 0.90) | 0.95 | 0.93 |
+| `gemini-embedding-001` | run `uv run triage-kb eval` | |
+
+Known limits: no hybrid (keyword + vector) search, no re-ranking, and matches usually land on "Symptoms" sections rather than "Resolution" (small-to-big retrieval would fix that).
+
+## Guardrails
+
+No single check stops prompt injection, so the design limits what a fooled model can do:
+
+| Layer | What it does | Where |
+|---|---|---|
+| 1. Input scan | Weighted patterns (override instructions, role change, prompt leaks, chat tokens, bulk/close directives). `flag` warns the reviewer; `block` skips automatic triage | `guardrails.scan_for_injection`, node `guard_input` |
+| 2. Prompt structure | Instructions only in the system message; ticket and KB text inside `<ticket>` / `<kb>` tags, labelled as data | `prompts.py` |
+| 3. Output schema | Pydantic outputs; **the LLM never chooses the incident number** (code adds it) and has **no field to close or resolve** a ticket | `schemas.py`, `propose` |
+| 4. Policy check | Drops any action that names an unknown group, disagrees with the classification, or repeats a tool; tells the reviewer why | `guardrails.check_proposal`, node `check_policy` |
+| 5. Human approval | Nothing is written without approval; `execute` refuses if the actions changed after they were approved (SHA-256 of the approved actions) | `approve`, `execute` |
+| 6. Least privilege | Client tool allowlist (no `create_incident`), MCP server allowlist, integration user can't write groups/users | `runtime.py`, `server.py`, mock ACLs |
+| Also | Retrieved KB text is screened by the same scanner; injected-looking chunks are dropped | `retrieve` |
+
+The scanner is a heuristic: it flags INC0010006 and passes normal requests like "please assign this to the network team", but a paraphrased attack can get through (there's a test that documents this). Layers 3–6 don't depend on it.
+
+## Evals
+
+```bash
+uv run triage-eval                      # 40 labelled tickets, real LLM, gate on evals/thresholds.json
+uv run triage-eval --only E018,E039     # a few tickets
+uv run triage-eval --sleep 4            # pause between tickets (free-tier rate limits)
+```
+
+Each labelled ticket in `evals/tickets.csv` is created in a fresh mock ServiceNow and run through the **whole agent**, exactly as in production, except that "eval-bot" approves. Then the ticket is read back. Labels cover all 7 categories and all 5 priorities, with 3 prompt-injection tickets. Rows marked `DEBATABLE` are honest judgement calls.
+
+| Metric | What it checks |
+|---|---|
+| Category / impact / urgency / priority / group accuracy | The classification matches the label (priority is derived from impact × urgency) |
+| Tool calls exactly right | The approved actions are exactly `update_incident` with the labelled values plus `assign_group` with the labelled group |
+| Ticket correct in ServiceNow afterwards | Category, priority and group as actually stored, read back after execution |
+| KB article retrieved / citations relevant | Retrieval found a labelled article; cited sections belong to labelled articles |
+| Proposals citing sources not retrieved | Groundedness: the LLM cited an id it was never shown (those citations are dropped) |
+| Injection recall / false positives / resistance | The scanner flags the injected tickets, flags no clean ones, and injected tickets still go to the right team |
+| Latency p50 / p95 | Seconds per ticket, end to end |
+
+A crashed run counts as wrong for every metric. `tests/test_evals.py` checks the harness itself: a "perfect" scripted model must score 1.0, and a lazy one must fail the gate. The **eval** GitHub workflow (`.github/workflows/eval.yml`) runs retrieval and agent evals with real Gemini on demand and on pushes that touch the agent, the KB or the eval data. The report goes into the job summary.
+
+Results: *pending the first real run.*
+
 ## Roadmap
 
 - [x] **Phase 0: Foundation.** Scaffold, mock ServiceNow API, HITL demo, ServiceNow client (retries, backoff, idempotent create)
 - [x] **Phase 1: MCP server.** Tools, resource, error mapping, stdio, contract tests
 - [x] **Phase 2: Agent graph + LLM (CLI).** load → classify → retrieve → propose → approve (interrupt) → execute → summarize; SQLite checkpoints; CLI
-- [ ] **Phase 3: RAG.** ~15 KB articles, heading-aware chunks with metadata, vector store, citations, `search_kb` tool, retrieval hit-rate check
-- [ ] **Phase 4: Guardrails.** Prompt-injection check, tool allowlist, proposal schema validation, approval enforced in code
-- [ ] **Phase 5: Evals + CI gate.** 30–50 labelled tickets; category/impact/urgency/priority/group accuracy, tool-call correctness, groundedness; CI pass threshold
+- [x] **Phase 3: RAG.** 15 KB articles, heading-aware chunks with metadata, Gemini embeddings, FAISS, `search_kb` MCP tool, validated citations, retrieval eval
+- [x] **Phase 4: Guardrails.** Injection scan (flag/block), policy check on proposals, approval hash, KB screening, least privilege
+- [ ] **Phase 5: Evals + CI gate.** 40 labelled tickets, end-to-end runner, metrics, thresholds, eval workflow ✅. Label review + first real run in progress
 - [ ] **Phase 6: Observability + agent API.** JSONL run log (tokens, cost, latency, steps), `/metrics`, approve/reject endpoints
 - [ ] **Phase 7: Ship.** Docker, Render deploy, eval results and live link here
 - [ ] Phase 8 (optional): React approval page
