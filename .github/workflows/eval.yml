@@ -39,10 +39,16 @@ jobs:
       - name: Agent eval (fails below evals/thresholds.json)
         if: env.GEMINI_API_KEY != ''
         run: uv run triage-eval --sleep 4
+      - name: Held-out eval (report only)
+        if: always() && env.GEMINI_API_KEY != ''
+        run: uv run triage-eval --cases evals/holdout.csv --out evals/results/holdout --no-gate --sleep 4
 
       - name: Report in the job summary
         if: always() && env.GEMINI_API_KEY != ''
-        run: cat evals/results/latest.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat evals/results/latest.md >> "$GITHUB_STEP_SUMMARY" || true
+          echo "## Held-out set" >> "$GITHUB_STEP_SUMMARY"
+          cat evals/results/holdout/latest.md >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v7
         if: always() && env.GEMINI_API_KEY != ''
         with:
