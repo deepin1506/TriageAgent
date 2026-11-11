@@ -7,6 +7,7 @@
     uv run triage show <thread>               # checkpointed state of a run
 
 Needs the mock API running (uv run mock-snow). The MCP server is launched over stdio.
+Every finished run is appended to the run log (RUN_LOG, default runs/runs.jsonl).
 """
 
 import argparse
@@ -15,20 +16,19 @@ import getpass
 import json
 import os
 import sys
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph.state import CompiledStateGraph
-from langgraph.types import Command
 
 from triage.agent.graph import build_graph
 from triage.agent.runtime import AgentDeps, connect_tools
+from triage.agent.service import NotPending, RunConflict, RunRegistry, TriageService
 from triage.config import get_settings
 from triage.llm import LLMConfigError, make_chat_model
+from triage.observability import RunLog
 
 
 def _print_json(label: str, value: Any) -> None:
@@ -36,12 +36,13 @@ def _print_json(label: str, value: Any) -> None:
 
 
 @asynccontextmanager
-async def _session() -> AsyncIterator[tuple[CompiledStateGraph, AgentDeps]]:
+async def _session() -> AsyncIterator[TriageService]:
     settings = get_settings()
     llm = make_chat_model(settings)  # fails fast on missing config
     Path(settings.checkpoint_db).parent.mkdir(parents=True, exist_ok=True)
     async with (
         AsyncSqliteSaver.from_conn_string(settings.checkpoint_db) as saver,
+        RunRegistry.open(settings.checkpoint_db) as registry,
         connect_tools() as tools,
     ):
         deps = AgentDeps(
@@ -50,7 +51,8 @@ async def _session() -> AsyncIterator[tuple[CompiledStateGraph, AgentDeps]]:
             injection_mode=settings.guard_injection_mode,
             injection_threshold=settings.guard_injection_threshold,
         )
-        yield build_graph().compile(checkpointer=saver), deps
+        graph = build_graph().compile(checkpointer=saver)
+        yield TriageService(graph, deps, registry, RunLog(settings.run_log), settings)
 
 
 def _ask_decision() -> dict[str, Any]:
@@ -59,33 +61,39 @@ def _ask_decision() -> dict[str, Any]:
     return {"approved": answer in ("y", "yes"), "reviewer": getpass.getuser(), "comment": comment}
 
 
-async def _drive(
-    graph: CompiledStateGraph,
-    deps: AgentDeps,
-    config: dict[str, Any],
-    first_input: Any,
-    prompt: bool,
-) -> None:
-    thread = config["configurable"]["thread_id"]
-    out = await graph.ainvoke(first_input, config, context=deps)
-    while "__interrupt__" in out:
-        payload = out["__interrupt__"][0].value
+def _print_usage(view: dict[str, Any]) -> None:
+    u = view["usage"]
+    cost = "n/a" if u["cost_usd"] is None else f"${u['cost_usd']:.6f}"
+    print(
+        f"\nAgent time {u['agent_ms'] / 1000:.1f}s, {u['llm_calls']} LLM call(s), "
+        f"{u['input_tokens']} in / {u['output_tokens']} out tokens, cost {cost}"
+    )
+
+
+async def _drive(service: TriageService, view: dict[str, Any], prompt: bool) -> None:
+    thread = view["thread_id"]
+    while view["status"] == "pending_approval":
+        payload = view["pending"]
         _print_json(f"Waiting for approval (thread {thread}):", payload)
         for warning in payload.get("warnings", []):
             print(f"\n!! WARNING: {warning}")
         if not prompt:
             print(f"\nResume with:  uv run triage resume {thread} approve|reject")
             return
-        out = await graph.ainvoke(Command(resume=_ask_decision()), config, context=deps)
-    _print_json("Results:", out.get("results", []))
-    print(f"\nSummary: {out.get('summary', '(none)')}")
+        view = await service.decide(thread, _ask_decision())
+    _print_json("Results:", view.get("results") or [])
+    print(f"\nSummary: {view.get('summary') or '(none)'}")
+    _print_usage(view)
 
 
-async def _run(args: argparse.Namespace) -> None:
-    thread = args.thread or f"{args.number}-{uuid.uuid4().hex[:6]}"
-    async with _session() as (graph, deps):
-        config = {"configurable": {"thread_id": thread}}
-        await _drive(graph, deps, config, {"number": args.number}, prompt=not args.no_prompt)
+async def _run(args: argparse.Namespace) -> str | None:
+    async with _session() as service:
+        try:
+            view = await service.start(args.number, args.thread)
+        except RunConflict as err:
+            return f"{err}. Resume it, or wait for it to finish."
+        await _drive(service, view, prompt=not args.no_prompt)
+    return None
 
 
 async def _resume(args: argparse.Namespace) -> str | None:
@@ -94,18 +102,18 @@ async def _resume(args: argparse.Namespace) -> str | None:
         "reviewer": args.reviewer or getpass.getuser(),
         "comment": args.comment,
     }
-    async with _session() as (graph, deps):
-        config = {"configurable": {"thread_id": args.thread}}
-        snapshot = await graph.aget_state(config)
-        if not snapshot.interrupts:
-            return f"Thread {args.thread} is not waiting for approval."
-        await _drive(graph, deps, config, Command(resume=decision), prompt=True)
+    async with _session() as service:
+        try:
+            view = await service.decide(args.thread, decision)
+        except NotPending as err:
+            return str(err)
+        await _drive(service, view, prompt=True)
     return None
 
 
 async def _show(args: argparse.Namespace) -> str | None:
-    async with _session() as (graph, _):
-        snapshot = await graph.aget_state({"configurable": {"thread_id": args.thread}})
+    async with _session() as service:
+        snapshot = await service.graph.aget_state({"configurable": {"thread_id": args.thread}})
         if not snapshot.values:
             return f"No checkpoints for thread {args.thread}."
         _print_json("State:", snapshot.values)

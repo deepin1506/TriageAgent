@@ -58,7 +58,10 @@ triage/
   mcp_server/     MCP server (SDK v2): tools, resource, contracts
   llm.py          Gemini / Azure OpenAI swap; call_structured (validation, one repair retry, usage)
   agent/          runtime.py (MCP gateway + allowlist), state.py, schemas.py (LLM outputs),
-                  prompts.py, nodes.py (the steps), graph.py (the wiring)
+                  prompts.py, nodes.py (the steps), graph.py (the wiring), tracing.py
+                  (per-step timing + tokens), service.py (runs, run registry; CLI and API)
+  observability.py  Run records, JSONL run log, /metrics aggregates
+  api/            HTTP API (FastAPI): start runs, approval queue, decisions, metrics
   kb/             RAG: chunking.py, embeddings.py, store.py (FAISS), evaluate.py, cli.py
   evals/          Agent eval: dataset.py, runner.py, metrics.py, cli.py
   cli.py          triage run / resume / show
@@ -154,7 +157,49 @@ uv run triage resume INC0010001-a1b2c3 approve --comment "ok"
 uv run triage show INC0010001-a1b2c3               # state of any run
 ```
 
-Runs are checkpointed in SQLite (`CHECKPOINT_DB`), so an approval can come from a different process, hours later. The CLI launches the MCP server over stdio. The agent can only call `get_incident`, `update_incident` and `assign_group` (client-side allowlist); `create_incident` exists on the server but isn't needed for triage.
+Runs are checkpointed in SQLite (`CHECKPOINT_DB`), so an approval can come from a different process, hours later. Each finished run prints its agent time, LLM calls, tokens and cost, and is appended to the run log. The CLI launches the MCP server over stdio. The agent can only call `get_incident`, `update_incident` and `assign_group` (client-side allowlist); `create_incident` exists on the server but isn't needed for triage.
+
+## HTTP API
+
+```powershell
+# .env: API_KEY=<a long random string>   (the API refuses to start without one)
+uv run mock-snow                 # terminal 1
+uv run triage-api                # terminal 2: http://127.0.0.1:8000/docs (Swagger UI)
+```
+
+| Method | Path | What it does |
+|---|---|---|
+| GET | `/health` | Liveness, no key (for load balancers and Render) |
+| POST | `/triage` `{"number"}` | Start a run. Returns **202** at once with `thread_id`; `?wait=true` blocks until it pauses or finishes |
+| GET | `/runs?status=pending_approval` | The approval queue (`running`, `pending_approval`, `done`, `error`) |
+| GET | `/runs/{thread_id}` | One run: proposal, warnings, citations, decision, results, summary, usage |
+| POST | `/runs/{thread_id}/decision` `{"approved", "reviewer", "comment"}` | Approve or reject; executes on approval |
+| GET | `/metrics` | Aggregates from the run log |
+
+Everything except `/health` needs the `X-API-Key` header (compared in constant time). Design points:
+
+- **Runs are asynchronous.** An LLM run can take a minute, longer than many proxies allow for one request, so `POST /triage` returns 202 and the client polls.
+- **The CLI and the API share one `TriageService`**, so they behave and log identically. A run started in the CLI shows up in the API's approval queue.
+- **A run registry** (a table next to the LangGraph checkpoints) holds each run's status. Two rules are enforced atomically in SQL, so they hold even with two API processes: **one active run per incident** (409 otherwise), and **one decision per run** (a compare-and-set update, so two reviewers clicking approve at once can't both execute; the loser gets 409).
+- **Restart recovery**: at startup, runs left `running` by a crash are checked against their checkpoint. If they had reached the approval point they go back to the queue; otherwise they're marked `error`.
+- **Limits, honestly**: one shared API key, and the reviewer name is whatever the client sends. A real deployment would put SSO in front and take the reviewer from the token.
+
+## Observability
+
+Every graph node is wrapped by `traced()` (`triage/agent/tracing.py`), which appends one event per step to the checkpointed state: start time, duration, and for LLM steps the tokens, latency and attempts of each call. `call_structured` reports its calls through a context variable, so the nodes themselves don't change. Because the trace is checkpointed, it survives the pause for approval even when another process resumes the run, and the human's wait is measured separately from the agent's time.
+
+Each finished run (applied, rejected, blocked, or crashed: failures are logged too) appends one line to `RUN_LOG`. The shape of a line (values illustrative):
+
+```json
+{"thread_id": "INC0010006-584e9e89", "outcome": "applied", "classification": {...},
+ "injection_flagged": true, "reviewer": "deepin", "approval_wait_s": 42.0,
+ "agent_ms": 6120.4, "llm_calls": 2, "input_tokens": 2310, "output_tokens": 180, "cost_usd": null,
+ "steps": [{"node": "load", "ms": 85.0}, {"node": "classify", "ms": 2810.2, "tokens": 1270}, ...]}
+```
+
+`GET /metrics` aggregates it: runs by outcome, approval rate, agent latency p50/p95, approval wait p50/p95, tokens, cost, structured-output repair retries, injection flags, policy violations and errors. Cost needs `LLM_PRICE_INPUT_PER_MTOK` and `LLM_PRICE_OUTPUT_PER_MTOK` from your provider's pricing page. Without them it is reported as unknown rather than guessed. The eval report includes tokens and cost per ticket too.
+
+Next steps if this went to production: OpenTelemetry traces instead of a JSONL file, Prometheus format for `/metrics`, and log rotation.
 
 ## Knowledge base (RAG)
 
@@ -260,6 +305,6 @@ What happened, honestly:
 - [x] **Phase 3: RAG.** 15 KB articles, heading-aware chunks with metadata, Gemini embeddings, FAISS, `search_kb` MCP tool, validated citations, retrieval eval
 - [x] **Phase 4: Guardrails.** Injection scan (flag/block), policy check on proposals, approval hash, KB screening, least privilege
 - [x] **Phase 5: Evals + CI gate.** 40 labelled tickets + 10 held out, end-to-end runner, metrics, thresholds set from real runs, provider-outage retries, eval workflow
-- [ ] **Phase 6: Observability + agent API.** JSONL run log (tokens, cost, latency, steps), `/metrics`, approve/reject endpoints
+- [x] **Phase 6: Observability + agent API.** Per-step tracing (time, tokens, cost), JSONL run log, `/metrics`, HTTP API with approval queue, run registry (one active run per incident, one decision per run), restart recovery
 - [ ] **Phase 7: Ship.** Docker, Render deploy, eval results and live link here
 - [ ] Phase 8 (optional): React approval page

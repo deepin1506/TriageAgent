@@ -6,7 +6,10 @@ directly, so every call gets the same validation, repair retry and usage account
 """
 
 import time
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -44,6 +47,36 @@ class StructuredResult[T: BaseModel]:
     usage: Usage
     latency_ms: float
     attempts: int
+
+
+# Metering: call_structured reports every LLM call to whoever is listening (the graph's
+# tracing wrapper), so nodes don't have to pass usage around themselves.
+_meter: ContextVar[list[dict[str, Any]] | None] = ContextVar("llm_meter", default=None)
+
+
+@contextmanager
+def metering() -> Iterator[list[dict[str, Any]]]:
+    """Collect the LLM calls made inside this block: [{schema, tokens, latency_ms, ...}]."""
+    calls: list[dict[str, Any]] = []
+    token = _meter.set(calls)
+    try:
+        yield calls
+    finally:
+        _meter.reset(token)
+
+
+def _record(schema: str, usage: Usage, latency_ms: float, attempts: int, ok: bool) -> None:
+    calls = _meter.get()
+    if calls is not None:
+        calls.append(
+            {
+                "schema": schema,
+                **asdict(usage),
+                "latency_ms": round(latency_ms, 1),
+                "attempts": attempts,
+                "ok": ok,
+            }
+        )
 
 
 def make_chat_model(settings: Settings) -> BaseChatModel:
@@ -143,6 +176,7 @@ async def call_structured[T: BaseModel](
         parsed, last_error = out.get("parsed"), out.get("parsing_error")
         if isinstance(parsed, schema) and last_error is None:
             latency = (time.perf_counter() - start) * 1000
+            _record(schema.__name__, usage, latency, attempt, ok=True)
             return StructuredResult(parsed, usage, latency, attempt)
         raw = out.get("raw")
         history += [
@@ -155,6 +189,7 @@ async def call_structured[T: BaseModel](
                 )
             ),
         ]
+    _record(schema.__name__, usage, (time.perf_counter() - start) * 1000, max_attempts, ok=False)
     raise StructuredOutputError(
         f"{schema.__name__} still invalid after {max_attempts} attempts: {last_error}"
     )

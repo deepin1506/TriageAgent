@@ -17,6 +17,7 @@ dependencies = [
     "langchain-openai>=1.7",
     "faiss-cpu>=1.12",
     "numpy>=2.0",
+    "aiosqlite>=0.20",
 ]
 
 [project.scripts]
@@ -24,6 +25,7 @@ mock-snow = "mock_snow.__main__:main"
 triage = "triage.cli:main"
 triage-kb = "triage.kb.cli:main"
 triage-eval = "triage.evals.cli:main"
+triage-api = "triage.api.app:main"
 
 [dependency-groups]
 dev = [

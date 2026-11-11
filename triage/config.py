@@ -44,8 +44,17 @@ class Settings(BaseSettings):
     guard_injection_mode: Literal["flag", "block"] = "flag"  # block = skip automatic triage
     guard_injection_threshold: int = 3  # summed signal weight that counts as an attack
 
+    # Observability. Prices in USD per million tokens, from your provider's pricing page;
+    # unset = cost is reported as unknown rather than guessed.
+    llm_price_input_per_mtok: float | None = None
+    llm_price_output_per_mtok: float | None = None
+
+    # HTTP API (triage-api). No key = the API refuses to start: fail closed.
+    api_key: SecretStr | None = None
+    api_cors_origins: list[str] = []  # e.g. ["http://localhost:5173"] for the React page
+
     # Local state
-    checkpoint_db: str = "data/checkpoints.db"
+    checkpoint_db: str = "data/checkpoints.db"  # LangGraph checkpoints + the run registry
     run_log: str = "runs/runs.jsonl"
 
 

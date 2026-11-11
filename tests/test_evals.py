@@ -143,6 +143,8 @@ async def test_a_perfect_model_scores_perfectly_and_passes_the_gate() -> None:
     ):
         assert s[metric] == 1.0, metric
     assert s["errors"] == 0 and s["injection_false_positive_rate"] == 0.0
+    assert s["tokens_per_ticket"] == 240 and s["llm_repair_retries"] == 0  # 2 calls x 120
+    assert s["cost_per_ticket_usd"] is None  # no prices configured
     assert s["kb_hit_rate"] >= 0.8  # offline lexical embedder; the real one is measured live
     assert check(s, THRESHOLDS) == []
 

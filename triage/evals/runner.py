@@ -26,6 +26,7 @@ from triage.agent.runtime import AgentDeps, connect_tools
 from triage.config import Settings
 from triage.llm import is_transient
 from triage.mcp_server.server import build_server, make_snow_client
+from triage.observability import usage
 
 from .dataset import EvalCase
 
@@ -48,6 +49,7 @@ class CaseResult:
     results: list[dict[str, Any]] = field(default_factory=list)
     final: dict[str, Any] | None = None  # the ticket as ServiceNow has it afterwards
     latency_s: float = 0.0
+    usage: dict[str, Any] = field(default_factory=dict)  # tokens, cost, LLM calls (Phase 6)
     attempts: int = 1  # >1 when the ticket was re-run after a provider outage
     transient: bool = False  # the error was the provider's (overload, rate limit, timeout)
 
@@ -55,7 +57,7 @@ class CaseResult:
         return asdict(self)
 
 
-def _from_state(result: CaseResult, state: dict[str, Any]) -> None:
+def _from_state(result: CaseResult, state: dict[str, Any], settings: Settings) -> None:
     proposal = state.get("proposal", {})
     result.classification = state.get("classification")
     result.actions = proposal.get("actions", [])
@@ -65,10 +67,18 @@ def _from_state(result: CaseResult, state: dict[str, Any]) -> None:
     result.injection_flagged = bool(state.get("guard", {}).get("injection", {}).get("flagged"))
     result.violations = state.get("policy", {}).get("violations", [])
     result.results = state.get("results", [])
+    result.usage = usage(state.get("trace", []), settings)
 
 
 async def _run_case(
-    case: EvalCase, attempt: int, *, graph: Any, snow: Any, tools: Any, deps: AgentDeps
+    case: EvalCase,
+    attempt: int,
+    *,
+    graph: Any,
+    snow: Any,
+    tools: Any,
+    deps: AgentDeps,
+    settings: Settings,
 ) -> CaseResult:
     result = CaseResult(case.id, attempts=attempt)
     start = time.perf_counter()
@@ -85,7 +95,7 @@ async def _run_case(
         state = await graph.ainvoke({"number": result.number}, config, context=deps)
         if "__interrupt__" in state:
             state = await graph.ainvoke(Command(resume=APPROVE), config, context=deps)
-        _from_state(result, state)
+        _from_state(result, state, settings)
         result.final = await tools.call("get_incident", {"number": result.number})
     except Exception as err:  # one bad case must not stop the whole run
         result.error = f"{type(err).__name__}: {err}"
@@ -148,7 +158,13 @@ async def run_eval(
                         injection_threshold=settings.guard_injection_threshold,
                     )
                     return await _run_case(
-                        case, attempt, graph=graph, snow=snow, tools=tools, deps=deps
+                        case,
+                        attempt,
+                        graph=graph,
+                        snow=snow,
+                        tools=tools,
+                        deps=deps,
+                        settings=settings,
                     )
 
                 for i, case in enumerate(cases, start=1):

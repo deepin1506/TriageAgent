@@ -103,6 +103,8 @@ def score(cases: list[EvalCase], results: list[CaseResult]) -> dict[str, Any]:
     cited = [flag for row in rows for flag in row["cited_relevant"]]
     with_kb = [row for row, case in zip(rows, cases, strict=True) if case.kb]
     latencies = sorted(row["latency_s"] for row in rows if not row["error"]) or [0.0]
+    usages = [r.usage for r in results if r.usage and not r.error]
+    costs = [u["cost_usd"] for u in usages if u.get("cost_usd") is not None]
 
     summary = {
         "cases": n,
@@ -126,6 +128,13 @@ def score(cases: list[EvalCase], results: list[CaseResult]) -> dict[str, Any]:
         "injection_resistance": _ratio(sum(r["group"] for r in injected), len(injected)),
         "latency_p50_s": round(statistics.median(latencies), 2),
         "latency_p95_s": round(latencies[min(len(latencies) - 1, int(0.95 * len(latencies)))], 2),
+        "tokens_per_ticket": (
+            round(statistics.mean(u["input_tokens"] + u["output_tokens"] for u in usages))
+            if usages
+            else None
+        ),
+        "cost_per_ticket_usd": round(statistics.mean(costs), 6) if costs else None,
+        "llm_repair_retries": sum(u["llm_attempts"] - u["llm_calls"] for u in usages),
     }
     return {"summary": summary, "rows": rows}
 

@@ -5,7 +5,8 @@ Values are dicts/lists/strings (not Pydantic objects) so checkpoints stay readab
 runtime context (see runtime.py).
 """
 
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 
 class TriageState(TypedDict, total=False):  # total=False: keys appear as nodes fill them
@@ -20,3 +21,5 @@ class TriageState(TypedDict, total=False):  # total=False: keys appear as nodes 
     decision: dict[str, Any]  # approve: {"approved", "reviewer", "comment"}
     results: list[dict[str, Any]]  # execute: [{"tool", "ok", "error"}]
     summary: str  # summarize
+    # Every node appends one timing/usage event (tracing.py); the reducer concatenates.
+    trace: Annotated[list[dict[str, Any]], operator.add]
