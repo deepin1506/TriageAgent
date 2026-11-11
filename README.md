@@ -2,7 +2,9 @@
 
 An IT ticket triage agent: it classifies an incident, retrieves relevant KB articles, proposes an action, waits for **human approval**, then executes it through **MCP tools** against a ServiceNow-shaped API.
 
-> **Status: Phases 0–4 done, Phase 5 in progress** (see [Roadmap](#roadmap)): mock ServiceNow API, client, MCP server, the LangGraph agent with human approval, RAG with cited sources, layered guardrails, and an end-to-end eval harness. Real eval numbers and a live link will be added once they exist.
+**Live demo:** [triage-agent-cjb4.onrender.com/docs](https://triage-agent-cjb4.onrender.com/docs). No key needed. It runs against its own fake ServiceNow and resets on every restart. Free tier: the first request after ~15 idle minutes takes about a minute while it wakes up. Try `GET /demo/incidents`, then `POST /triage` with `wait=true`, then approve it with `POST /runs/{thread_id}/decision`.
+
+> **Status: Phases 0–7 done** (see [Roadmap](#roadmap)): mock ServiceNow API, client, MCP server, the LangGraph agent with human approval, RAG with cited sources, layered guardrails, an eval harness gated in CI ([results](#results-gemini-31-flash-lite-gemini-embeddings)), tracing and an HTTP API, deployed on Render. Next: a React approval page.
 
 ## Architecture (target)
 
@@ -317,7 +319,7 @@ docker compose up --build          # http://localhost:8000/docs, reads .env
 
 Deploy your own: on Render choose **New → Blueprint**, pick this repo, and paste your `GEMINI_API_KEY` when asked. `render.yaml` sets everything else, generates the owner `API_KEY`, and deploys a commit only after its GitHub checks pass (**ci**, plus **eval** when that commit triggers it). CI builds the image and smoke-tests it as the demo, so a broken Dockerfile fails in CI rather than on Render.
 
-Live demo: *link added after the first deploy.*
+Live demo: **https://triage-agent-cjb4.onrender.com/docs**
 
 ## Roadmap
 
@@ -328,5 +330,5 @@ Live demo: *link added after the first deploy.*
 - [x] **Phase 4: Guardrails.** Injection scan (flag/block), policy check on proposals, approval hash, KB screening, least privilege
 - [x] **Phase 5: Evals + CI gate.** 40 labelled tickets + 10 held out, end-to-end runner, metrics, thresholds set from real runs, provider-outage retries, eval workflow
 - [x] **Phase 6: Observability + agent API.** Per-step tracing (time, tokens, cost), JSONL run log, `/metrics`, HTTP API with approval queue, run registry (one active run per incident, one decision per run), restart recovery
-- [ ] **Phase 7: Ship.** Docker, Render deploy, eval results and live link here
+- [x] **Phase 7: Ship.** Docker image (built and smoke-tested in CI), demo mode with spend caps, Render Blueprint, live link
 - [ ] Phase 8 (optional): React approval page
