@@ -96,6 +96,20 @@ def make_chat_model(settings: Settings) -> BaseChatModel:
     )
 
 
+def is_transient(err: BaseException) -> bool:
+    """True when the provider was overloaded, rate-limited, timed out or unreachable, so the
+    same request may succeed later. Uses LangChain's provider-neutral error types
+    (`is_retryable` on ModelError), so it works the same for Gemini and Azure OpenAI."""
+    seen: set[int] = set()
+    current: BaseException | None = err
+    while current is not None and id(current) not in seen:
+        if getattr(current, "is_retryable", False) is True:
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _usage(message: Any) -> Usage:
     meta = getattr(message, "usage_metadata", None) or {}
     return Usage(

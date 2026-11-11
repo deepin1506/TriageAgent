@@ -41,6 +41,8 @@ LABELS = {
     "latency_p50_s": "Latency p50 (s)",
     "latency_p95_s": "Latency p95 (s)",
     "errors": "Runs that crashed",
+    "provider_errors": "...of which the LLM provider was down",
+    "retried": "Tickets re-run after a provider error",
 }
 
 
@@ -76,6 +78,12 @@ def main() -> None:
     parser.add_argument("--only", help="comma-separated ticket ids, e.g. E001,E018")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--sleep", type=float, default=0.0, help="seconds between tickets")
+    parser.add_argument(
+        "--retry-rounds", type=int, default=2, help="re-runs of tickets the provider failed"
+    )
+    parser.add_argument(
+        "--retry-wait", type=float, default=60.0, help="seconds to wait before each re-run"
+    )
     parser.add_argument("--out", default="evals/results")
     parser.add_argument("--no-gate", action="store_true")
     args = parser.parse_args()
@@ -94,7 +102,15 @@ def main() -> None:
         cases = cases[: args.limit]
 
     results = asyncio.run(
-        run_eval(cases, lambda _: llm, settings, sleep_s=args.sleep, progress=print)
+        run_eval(
+            cases,
+            lambda _: llm,
+            settings,
+            sleep_s=args.sleep,
+            retry_rounds=args.retry_rounds,
+            retry_wait_s=args.retry_wait,
+            progress=print,
+        )
     )
     scored = score(cases, results)
     report = {

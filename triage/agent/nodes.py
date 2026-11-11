@@ -17,7 +17,7 @@ from triage.llm import call_structured
 from . import prompts
 from .guardrails import actions_hash, check_proposal, scan_for_injection
 from .runtime import AgentDeps, ToolCallError
-from .schemas import Classification, Decision, Proposal
+from .schemas import Decision, Proposal, classification_for
 from .state import TriageState
 
 log = logging.getLogger(__name__)
@@ -90,7 +90,9 @@ def format_kb(hits: list[dict[str, Any]]) -> str:
 async def classify(state: TriageState, runtime: Runtime[AgentDeps]) -> dict[str, Any]:
     """LLM call 1: category, impact, urgency and group for the incident."""
 
-    groups_text = "\n".join(f"- {g['name']}: {g['description']}" for g in state["groups"])
+    # "name (description)": with "name: description", the model once read
+    # "Service Desk: L1 ..." as a group called "Service Desk: L1".
+    groups_text = "\n".join(f"- {g['name']} ({g['description']})" for g in state["groups"])
     incident = state["incident"]
     messages = [
         SystemMessage(prompts.CLASSIFY_SYSTEM.format(groups=groups_text)),
@@ -102,7 +104,8 @@ async def classify(state: TriageState, runtime: Runtime[AgentDeps]) -> dict[str,
             )
         ),
     ]
-    result = await call_structured(runtime.context.llm, Classification, messages)
+    schema = classification_for([g["name"] for g in state["groups"]])
+    result = await call_structured(runtime.context.llm, schema, messages)
     return {"classification": result.value.model_dump()}
 
 

@@ -353,3 +353,18 @@ async def test_retrieve_drops_kb_hits_that_carry_instructions() -> None:
 
     out = await nodes.retrieve(CLASSIFIED, runtime(tools=FakeTools()))
     assert [h["id"] for h in out["kb"]] == ["KB0001#resolution"]
+
+
+def test_the_classification_schema_only_allows_real_groups() -> None:
+    from pydantic import ValidationError
+
+    from triage.agent.schemas import Classification, classification_for
+
+    schema = classification_for(["Service Desk", "Network Operations"])
+    enum = schema.model_json_schema()["properties"]["assignment_group"]["enum"]
+    assert enum == ["Service Desk", "Network Operations"]  # what the model is constrained to
+    ok = dict(category="inquiry", impact="3", urgency="3", rationale="r")
+    assert schema.model_validate({**ok, "assignment_group": "Service Desk"})
+    with pytest.raises(ValidationError):
+        schema.model_validate({**ok, "assignment_group": "Service Desk: L1"})  # eval run 4
+    assert issubclass(schema, Classification) and classification_for([]) is Classification

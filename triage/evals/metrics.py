@@ -67,6 +67,8 @@ def score(cases: list[EvalCase], results: list[CaseResult]) -> dict[str, Any]:
             {
                 "id": case.id,
                 "error": r.error,
+                "provider_error": bool(r.error and r.transient),
+                "attempts": r.attempts,
                 "category": _predicted(r, "category") == case.category,
                 "impact": _predicted(r, "impact") == case.impact,
                 "urgency": _predicted(r, "urgency") == case.urgency,
@@ -105,6 +107,8 @@ def score(cases: list[EvalCase], results: list[CaseResult]) -> dict[str, Any]:
     summary = {
         "cases": n,
         "errors": sum(1 for row in rows if row["error"]),
+        "provider_errors": sum(1 for row in rows if row["provider_error"]),
+        "retried": sum(1 for row in rows if row["attempts"] > 1),
         "category_accuracy": acc("category"),
         "impact_accuracy": acc("impact"),
         "urgency_accuracy": acc("urgency"),

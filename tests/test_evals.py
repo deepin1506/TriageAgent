@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.exceptions import ModelAPIError
+from langchain_core.runnables import RunnableLambda
 
 from tests.conftest import REPO, settings_for
 from tests.fakes import ScriptedLLM
@@ -152,3 +154,38 @@ async def test_a_lazy_model_fails_the_gate() -> None:
     assert s["citation_hallucination_rate"] == 1.0  # it cited a source it never saw
     failures = " ".join(check(s, THRESHOLDS))
     assert "category_accuracy" in failures and "citation_hallucination_rate" in failures
+
+
+class BrokenLLM:
+    """Every structured call fails with `error`."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def with_structured_output(self, *_: Any, **__: Any) -> RunnableLambda:
+        async def fail(_: Any) -> Any:
+            raise self.error
+
+        return RunnableLambda(fail)
+
+
+async def test_provider_outages_are_retried_and_bugs_are_not() -> None:
+    cases = load_cases(CSV)[:2]
+    seen: dict[str, int] = {}
+
+    def llm_for(case: EvalCase) -> Any:
+        seen[case.id] = seen.get(case.id, 0) + 1
+        if case.id == cases[0].id and seen[case.id] == 1:
+            return BrokenLLM(ModelAPIError("503 UNAVAILABLE"))  # overloaded once, then fine
+        if case.id == cases[1].id:
+            return BrokenLLM(RuntimeError("a bug"))  # never retried
+        return oracle(case)
+
+    settings = settings_for("http://replaced-by-the-runner")
+    results = await run_eval(cases, llm_for, settings, retry_rounds=2, retry_wait_s=0)
+    first, second = results
+    assert first.error is None and first.attempts == 2 and first.final is not None
+    assert second.error and not second.transient and second.attempts == 1
+    assert seen == {cases[0].id: 2, cases[1].id: 1}
+    summary = score(cases, results)["summary"]
+    assert summary["retried"] == 1 and summary["errors"] == 1 and summary["provider_errors"] == 0

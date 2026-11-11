@@ -121,3 +121,28 @@ async def test_repairs_once_with_the_error_fed_back() -> None:
 async def test_fails_closed_after_repair_attempt() -> None:
     with pytest.raises(StructuredOutputError, match="Verdict"):
         await call_structured(FlakyLLM(fail_times=5), Verdict, [HumanMessage("?")])
+
+
+# --- transient provider errors ------------------------------------------------------------
+
+
+def test_provider_outages_are_transient_and_everything_else_is_not() -> None:
+    from langchain_core.exceptions import (
+        ModelAPIError,
+        ModelAuthenticationError,
+        ModelRateLimitError,
+    )
+
+    from triage.llm import is_transient
+
+    assert is_transient(ModelAPIError("503 UNAVAILABLE"))
+    try:  # wrapped by another layer: the cause still counts
+        try:
+            raise ModelRateLimitError("429")
+        except ModelRateLimitError as inner:
+            raise RuntimeError("node failed") from inner
+    except RuntimeError as outer:
+        assert is_transient(outer)
+    assert not is_transient(ModelAuthenticationError("401: bad key"))  # retrying won't help
+    assert not is_transient(StructuredOutputError("still invalid"))
+    assert not is_transient(ValueError("a bug"))

@@ -24,6 +24,7 @@ from mock_snow.thread import running_mock
 from triage.agent.graph import build_graph
 from triage.agent.runtime import AgentDeps, connect_tools
 from triage.config import Settings
+from triage.llm import is_transient
 from triage.mcp_server.server import build_server, make_snow_client
 
 from .dataset import EvalCase
@@ -47,6 +48,8 @@ class CaseResult:
     results: list[dict[str, Any]] = field(default_factory=list)
     final: dict[str, Any] | None = None  # the ticket as ServiceNow has it afterwards
     latency_s: float = 0.0
+    attempts: int = 1  # >1 when the ticket was re-run after a provider outage
+    transient: bool = False  # the error was the provider's (overload, rate limit, timeout)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,16 +67,49 @@ def _from_state(result: CaseResult, state: dict[str, Any]) -> None:
     result.results = state.get("results", [])
 
 
+async def _run_case(
+    case: EvalCase, attempt: int, *, graph: Any, snow: Any, tools: Any, deps: AgentDeps
+) -> CaseResult:
+    result = CaseResult(case.id, attempts=attempt)
+    start = time.perf_counter()
+    try:
+        # Idempotent: a re-run finds the same incident. Provider errors happen in the LLM
+        # calls, which all come before approval, so a failed attempt has written nothing.
+        created = await snow.create_incident_idempotent(
+            {"short_description": case.short_description, "description": case.description},
+            correlation_id=f"eval-{case.id}",
+        )
+        result.number = created["number"]
+        # A fresh thread per attempt: a crashed attempt's checkpoint must not leak into it.
+        config = {"configurable": {"thread_id": f"eval-{case.id}-{attempt}"}}
+        state = await graph.ainvoke({"number": result.number}, config, context=deps)
+        if "__interrupt__" in state:
+            state = await graph.ainvoke(Command(resume=APPROVE), config, context=deps)
+        _from_state(result, state)
+        result.final = await tools.call("get_incident", {"number": result.number})
+    except Exception as err:  # one bad case must not stop the whole run
+        result.error = f"{type(err).__name__}: {err}"
+        result.transient = is_transient(err)
+    result.latency_s = round(time.perf_counter() - start, 3)
+    return result
+
+
 async def run_eval(
     cases: list[EvalCase],
     llm_for: Callable[[EvalCase], Any],
     settings: Settings,
     *,
     sleep_s: float = 0.0,
+    retry_rounds: int = 2,
+    retry_wait_s: float = 60.0,
     progress: Callable[[str], None] = lambda _: None,
 ) -> list[CaseResult]:
     """`llm_for(case)` returns the chat model for that case (the same real model for every
-    case in a real run; a per-case scripted model in tests)."""
+    case in a real run; a per-case scripted model in tests).
+
+    Tickets that failed only because the provider was overloaded are re-run after a pause,
+    up to `retry_rounds` times. Anything else (bad output, a bug) is never retried, and a
+    ticket still failing after the last round counts as wrong."""
     password = secrets.token_urlsafe(16)
     mock_settings = MockSettings(
         _env_file=None,
@@ -85,6 +121,11 @@ async def run_eval(
         snow_mock_fault_rate=0.0,
     )
     results: list[CaseResult] = []
+
+    def report(i: int, total: int, r: CaseResult) -> None:
+        status = "ok" if not r.error else "PROVIDER ERROR" if r.transient else "ERROR"
+        progress(f"[{i}/{total}] {r.case_id} {status} ({r.latency_s:.1f}s)")
+
     with running_mock(mock_settings) as url:
         agent_settings = settings.model_copy(
             update={
@@ -98,40 +139,38 @@ async def run_eval(
         snow = make_snow_client(agent_settings)
         try:
             async with connect_tools(build_server(agent_settings)) as tools:
+
+                async def run_one(case: EvalCase, attempt: int) -> CaseResult:
+                    deps = AgentDeps(
+                        llm=llm_for(case),
+                        tools=tools,
+                        injection_mode="flag",  # measure the agent, don't skip it
+                        injection_threshold=settings.guard_injection_threshold,
+                    )
+                    return await _run_case(
+                        case, attempt, graph=graph, snow=snow, tools=tools, deps=deps
+                    )
+
                 for i, case in enumerate(cases, start=1):
-                    result = CaseResult(case.id)
-                    start = time.perf_counter()
-                    try:
-                        created = await snow.create_incident_idempotent(
-                            {
-                                "short_description": case.short_description,
-                                "description": case.description,
-                            },
-                            correlation_id=f"eval-{case.id}",
-                        )
-                        result.number = created["number"]
-                        deps = AgentDeps(
-                            llm=llm_for(case),
-                            tools=tools,
-                            injection_mode="flag",  # measure the agent, don't skip it
-                            injection_threshold=settings.guard_injection_threshold,
-                        )
-                        config = {"configurable": {"thread_id": f"eval-{case.id}"}}
-                        state = await graph.ainvoke({"number": result.number}, config, context=deps)
-                        if "__interrupt__" in state:
-                            state = await graph.ainvoke(
-                                Command(resume=APPROVE), config, context=deps
-                            )
-                        _from_state(result, state)
-                        result.final = await tools.call("get_incident", {"number": result.number})
-                    except Exception as err:  # one bad case must not stop the whole run
-                        result.error = f"{type(err).__name__}: {err}"
-                    result.latency_s = round(time.perf_counter() - start, 3)
-                    results.append(result)
-                    status = "ERROR" if result.error else "ok"
-                    progress(f"[{i}/{len(cases)}] {case.id} {status} ({result.latency_s:.1f}s)")
+                    results.append(await run_one(case, 1))
+                    report(i, len(cases), results[-1])
                     if sleep_s and i < len(cases):
                         await asyncio.sleep(sleep_s)  # stay under free-tier rate limits
+
+                for attempt in range(2, retry_rounds + 2):
+                    retry = [n for n, r in enumerate(results) if r.error and r.transient]
+                    if not retry:
+                        break
+                    progress(
+                        f"Provider errors on {len(retry)} ticket(s): retrying in "
+                        f"{retry_wait_s:.0f}s (attempt {attempt})"
+                    )
+                    await asyncio.sleep(retry_wait_s)
+                    for k, n in enumerate(retry, start=1):
+                        results[n] = await run_one(cases[n], attempt)
+                        report(k, len(retry), results[n])
+                        if sleep_s and k < len(retry):
+                            await asyncio.sleep(sleep_s)
         finally:
             await snow.aclose()
     return results

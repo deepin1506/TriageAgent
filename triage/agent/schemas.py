@@ -9,17 +9,38 @@ A prompt injection in ticket text therefore can't redirect a write to another in
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from triage.mcp_server.models import Category, Level
 
 
 class Classification(BaseModel):
     category: Category
-    impact: Level = Field(description="1 = many people/critical process, 2 = several, 3 = one")
-    urgency: Level = Field(description="1 = work stopped or safety/security risk, 3 = can wait")
+    # Descriptions go into the JSON schema the model sees: point at the rubric in the
+    # prompt rather than restating it, so the two can't drift apart.
+    impact: Level = Field(description="1, 2 or 3, using the impact rubric")
+    urgency: Level = Field(description="1, 2 or 3, using the urgency rubric")
     assignment_group: str = Field(description="Exactly one name from the group list")
     rationale: str = Field(description="One or two sentences: why these values")
+
+
+def classification_for(group_names: list[str]) -> type[Classification]:
+    """Classification with assignment_group limited to the live group names.
+
+    The names become an enum in the JSON schema, so the model can't invent one (eval run 4:
+    it answered "Service Desk: L1"). Groups come from ServiceNow at runtime, so the schema
+    is built per run. The policy check still verifies the name: defence in depth.
+    """
+    if not group_names:
+        return Classification
+    return create_model(
+        "Classification",
+        __base__=Classification,
+        assignment_group=(
+            Literal[tuple(group_names)],  # type: ignore[valid-type]
+            Field(description="Exactly one name from the group list"),
+        ),
+    )
 
 
 class UpdateArgs(BaseModel):
